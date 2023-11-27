@@ -15,13 +15,15 @@ function Invoke-ReconAsOutsider
     Starts tenant recon of the given domain. Gets all verified domains of the tenant and extracts information such as their type.
     Also checks whether Desktop SSO (aka Seamless SSO) is enabled for the tenant.
 
-    DNS:   Does the DNS record exists?
-    MX:    Does the MX point to Office 365?
-    SPF:   Does the SPF contain Exchange Online?
-    Type:  Federated or Managed
-    DMARC: Is the DMARC record configured?
-    STS:   The FQDN of the federated IdP's (Identity Provider) STS (Security Token Service) server
-    RPS:   Relaying parties of STS (AD FS)
+    DNS:     Does the DNS record exists?
+    MX:      Does the MX point to Office 365?
+    SPF:     Does the SPF contain Exchange Online?
+    Type:    Federated or Managed
+    DMARC:   Is the DMARC record configured?
+	DKIM:    Is the DKIM record configured?
+    MTA-STS: Is the MTA-STS record configured?										  
+    STS:     The FQDN of the federated IdP's (Identity Provider) STS (Security Token Service) server
+    RPS:     Relaying parties of STS (AD FS)
 
     .Parameter DomainName
     Any domain name of the Azure AD tenant.
@@ -36,53 +38,55 @@ function Invoke-ReconAsOutsider
     Invoke-AADIntReconAsOutsider -Domain company.com | Format-Table
 
     Tenant brand:       Company Ltd
-    Tenant name:        company
+    Tenant name:        company.onmicrosoft.com
     Tenant id:          05aea22e-32f3-4c35-831b-52735704feb3
     Tenant region:      NA
     DesktopSSO enabled: False
     MDI instance:       company.atp.azure.com
 
-    Name                           DNS   MX    SPF  DMARC  Type      STS
-    ----                           ---   --    ---  -----  ----      ---
-    company.com                   True  True  True   True  Federated sts.company.com
-    company.mail.onmicrosoft.com  True  True  True   True  Managed
-    company.onmicrosoft.com       True  True  True  False  Managed
-    int.company.com              False False False  False  Managed 
+    Name                           DNS   MX    SPF  DMARC  DKIM MTA-STS Type      STS
+    ----                           ---   --    ---  -----  ---- ------- ----      ---
+    company.com                   True  True  True   True  True    True Federated sts.company.com
+    company.mail.onmicrosoft.com  True  True  True   True  True   False Managed
+    company.onmicrosoft.com       True  True  True  False  True   False Managed
+    int.company.com              False False False  False  True   False Managed 
 
     .Example
     Invoke-AADIntReconAsOutsider -Domain company.com -GetRelayingParties | Format-Table
 
     Tenant brand:       Company Ltd
-    Tenant name:        company
+    Tenant name:        company.onmicrosoft.com
     Tenant id:          05aea22e-32f3-4c35-831b-52735704feb3
     Tenant region:      NA
+    Uses cloud sync:    True
     DesktopSSO enabled: False
     MDI instance:       company.atp.azure.com
 
-    Name                           DNS   MX    SPF  DMARC  Type      STS             RPS
-    ----                           ---   --    ---  -----  ----      ---             ---
-    company.com                   True  True  True   True  Federated sts.company.com {adatum.com, salesforce.com}
-    company.mail.onmicrosoft.com  True  True  True   True  Managed
-    company.onmicrosoft.com       True  True  True  False  Managed
-    int.company.com              False False False  False  Managed
+    Name                           DNS   MX    SPF  DMARC  DKIM MTA-STS Type      STS
+    ----                           ---   --    ---  -----  ---- ------- ----      ---
+    company.com                   True  True  True   True  True    True Federated sts.company.com
+    company.mail.onmicrosoft.com  True  True  True   True  True   False Managed
+    company.onmicrosoft.com       True  True  True  False  True   False Managed
+    int.company.com              False False False  False  True   False Managed 
 
     .Example
     Invoke-AADIntReconAsOutsider -UserName user@company.com | Format-Table
 
     Tenant brand:       Company Ltd
-    Tenant name:        company
+    Tenant name:        company.onmicrosoft.com
     Tenant id:          05aea22e-32f3-4c35-831b-52735704feb3
     Tenant region:      NA
     DesktopSSO enabled: False
     MDI instance:       company.atp.azure.com
+    Uses cloud sync:    True
     CBA enabled:        True
 
-    Name                           DNS   MX    SPF  DMARC  Type      STS
-    ----                           ---   --    ---  -----  ----      ---
-    company.com                   True  True  True   True  Federated sts.company.com
-    company.mail.onmicrosoft.com  True  True  True   True  Managed
-    company.onmicrosoft.com       True  True  True  False  Managed
-    int.company.com              False False False  False  Managed 
+    Name                           DNS   MX    SPF  DMARC  DKIM MTA-STS Type      STS
+    ----                           ---   --    ---  -----  ---- ------- ----      ---
+    company.com                   True  True  True   True  True    True Federated sts.company.com
+    company.mail.onmicrosoft.com  True  True  True   True  True   False Managed
+    company.onmicrosoft.com       True  True  True  False  True   False Managed
+    int.company.com              False False False  False  True   False Managed 
 #>
     [cmdletbinding()]
     Param(
@@ -115,17 +119,11 @@ function Invoke-ReconAsOutsider
         
         Write-Verbose "`n*`n* EXAMINING TENANT $tenantId`n*"
 
-        # Don't try to get other domains
-        if($Single)
-        {
-            $domains = @($DomainName)
-        }
-        else
-        {
-            Write-Verbose "Getting domains.."
-            $domains = Get-TenantDomains -Domain $DomainName
-            Write-Verbose "Found $($domains.count) domains!"
-        }
+        
+        Write-Verbose "Getting domains.."
+        $domains = Get-TenantDomains -Domain $DomainName
+        Write-Verbose "Found $($domains.count) domains!"
+        
 
         # Create an empty list
         $domainInformation = @()
@@ -137,99 +135,115 @@ function Invoke-ReconAsOutsider
         foreach($domain in $domains)
         {
             # Define variables
-            $exists =      $false
-            $hasCloudMX =  $false
-            $hasCloudSPF = $false
+            $exists =         $false
+            $hasCloudMX =     $false
+            $hasCloudSPF =    $false
+			$hasCloudDKIM =   $false
+			$hasCloudMTASTS = $false
 
-            Write-Progress -Activity "Getting DNS information" -Status $domain -PercentComplete (($c/$domains.count)*100)
+            if(-not $Single)
+            {
+                Write-Progress -Activity "Getting DNS information" -Status $domain -PercentComplete (($c/$domains.count)*100)
+            }
             $c++
 
             # Check if this is "the initial" domain
             if([string]::IsNullOrEmpty($tenantName) -and $domain.ToLower() -match "^[^.]*\.onmicrosoft.com$")
             {
-                $tenantName = $domain.Substring(0,$domain.IndexOf("."))
+                $tenantName = $domain
                 Write-Verbose "TENANT NAME: $tenantName"
             }
 
-            # Check whether the domain exists in DNS
-            try { $exists = (Resolve-DnsName -Name $Domain -ErrorAction SilentlyContinue -DnsOnly -NoHostsFile -NoIdn).count -gt 0 }  catch{}
-
-            if($exists)
-            {
-                # Check the MX record
-                $hasCloudMX = HasCloudMX -Domain $domain
-
-                # Check the SPF record
-                $hasCloudSPF = HasCloudSPF -Domain $domain
-
-                # Check the DMARC record
-                $hasDMARC = HasDMARC -Domain $domain
-            }
-
             # Check if the tenant has the Desktop SSO (aka Seamless SSO) enabled
-            if([string]::IsNullOrEmpty($tenantSSO) -or $tenantSSO -eq $false)
+            if([string]::IsNullOrEmpty($tenantSSO))
             {
                 $tenantSSO = HasDesktopSSO -Domain $domain
             }
 
-            # Get the federation information
-            $realmInfo = Get-UserRealmV2 -UserName "nn@$domain"
-            if([string]::IsNullOrEmpty($tenantBrand))
+            if(-not $Single -or ($Single -and $DomainName -eq $domain))
             {
-                $tenantBrand = $realmInfo.FederationBrandName
-                Write-Verbose "TENANT BRAND: $tenantBrand"
-            }
-            if($authUrl = $realmInfo.AuthUrl)
-            {
-                # Try to read relaying parties
+                # Check whether the domain exists in DNS
+                try { $exists = (Resolve-DnsName -Name $Domain -ErrorAction SilentlyContinue -DnsOnly -NoHostsFile -NoIdn).count -gt 0 }  catch{}
+
+                if($exists)
+                {
+                    # Check the MX record
+                    $hasCloudMX = HasCloudMX -Domain $domain
+
+                    # Check the SPF record
+                    $hasCloudSPF = HasCloudSPF -Domain $domain
+
+                    # Check the DMARC record
+                    $hasDMARC = HasDMARC -Domain $domain
+					
+					# Check the DKIM record
+					$hasCloudDKIM = HasCloudDKIM -Domain $domain
+					
+					# Check the MTA-STS record
+					$hasCloudMTASTS = HasCloudMTASTS -Domain $domain
+                }
+
+                # Get the federation information
+                $realmInfo = Get-UserRealmV2 -UserName "nn@$domain"
+                if([string]::IsNullOrEmpty($tenantBrand))
+                {
+                    $tenantBrand = $realmInfo.FederationBrandName
+                    Write-Verbose "TENANT BRAND: $tenantBrand"
+                }
+                if($authUrl = $realmInfo.AuthUrl)
+                {
+                    # Try to read relaying parties
+                    if($GetRelayingParties)
+                    {
+                        try
+                        {
+                        
+                            $idpUrl = $realmInfo.AuthUrl.Substring(0,$realmInfo.AuthUrl.LastIndexOf("/")+1)
+                            $idpUrl += "idpinitiatedsignon.aspx"
+                            Write-Verbose "Getting relaying parties for $domain from $idpUrl"
+                            [xml]$page = Invoke-RestMethod -Uri $idpUrl -TimeoutSec 3
+
+                            $selectElement = $page.html.body.div.div[2].div.div.div.form.div[1].div[1].select.option
+                            $relayingParties = New-Object string[] $selectElement.Count
+                            Write-Verbose "Got $relayingParties relaying parties from $idpUrl"
+                            for($o = 0; $o -lt $selectElement.Count; $o++)
+                            {
+                                $relayingParties[$o] = $selectElement[$o].'#text'
+                            }
+                    
+                        }
+                        catch{} # Okay
+                    }
+                    # Get just the server name
+                    $authUrl = $authUrl.split("/")[2]
+                }
+
+                # Set the return object properties
+                $attributes=[ordered]@{
+                    "Name" =    $domain
+                    "DNS" =     $exists
+                    "MX" =      $hasCloudMX
+                    "SPF" =     $hasCloudSPF
+                    "DMARC" =   $hasDMARC
+					"DKIM" =    $hasCloudDKIM						 
+					"MTA-STS" = $hasCloudMTASTS						   
+                    "Type" =    $realmInfo.NameSpaceType
+                    "STS" =     $authUrl 
+                }
                 if($GetRelayingParties)
                 {
-                    try
-                    {
-                        
-                        $idpUrl = $realmInfo.AuthUrl.Substring(0,$realmInfo.AuthUrl.LastIndexOf("/")+1)
-                        $idpUrl += "idpinitiatedsignon.aspx"
-                        Write-Verbose "Getting relaying parties for $domain from $idpUrl"
-                        [xml]$page = Invoke-RestMethod -Uri $idpUrl -TimeoutSec 3
-
-                        $selectElement = $page.html.body.div.div[2].div.div.div.form.div[1].div[1].select.option
-                        $relayingParties = New-Object string[] $selectElement.Count
-                        Write-Verbose "Got $relayingParties relaying parties from $idpUrl"
-                        for($o = 0; $o -lt $selectElement.Count; $o++)
-                        {
-                            $relayingParties[$o] = $selectElement[$o].'#text'
-                        }
-                    
-                    }
-                    catch{} # Okay
+                    $attributes["RPS"] =   $relayingParties 
                 }
-                # Get just the server name
-                $authUrl = $authUrl.split("/")[2]
+                Remove-Variable "relayingParties" -ErrorAction SilentlyContinue
+                $domainInformation += New-Object psobject -Property $attributes
             }
-
-            # Set the return object properties
-            $attributes=[ordered]@{
-                "Name" =  $domain
-                "DNS" =   $exists
-                "MX" =    $hasCloudMX
-                "SPF" =   $hasCloudSPF
-                "DMARC" = $hasDMARC
-                "Type" =  $realmInfo.NameSpaceType
-                "STS" =   $authUrl 
-            }
-            if($GetRelayingParties)
-            {
-                $attributes["RPS"] =   $relayingParties 
-            }
-            Remove-Variable "relayingParties" -ErrorAction SilentlyContinue
-            $domainInformation += New-Object psobject -Property $attributes
         }
 
         Write-Host "Tenant brand:       $tenantBrand"
         Write-Host "Tenant name:        $tenantName"
         Write-Host "Tenant id:          $tenantId"
         Write-Host "Tenant region:      $tenantRegion"
-
+        
         # DesktopSSO status not definitive with a single domain
         if(!$Single -or $tenantSSO -eq $true)
         {
@@ -237,10 +251,19 @@ function Invoke-ReconAsOutsider
         }
 
         # MDI instance not definitive, may have different instance name than the tenant name.
-        $tenantMDI = GetMDIInstance -Tenant $tenantName
-        if($tenantMDI)
+        if(![string]::IsNullOrEmpty($tenantName))
         {
-            Write-Host "MDI instance:       $tenantMDI"
+            $tenantMDI = GetMDIInstance -Tenant $tenantName
+            if($tenantMDI)
+            {
+                Write-Host "MDI instance:       $tenantMDI"
+            }
+        }
+
+        # Cloud sync not definitive, may use different domain name
+        if(DoesUserExists -User "ADToAADSyncServiceAccount@$($tenantName)")
+        {
+            Write-Host "Uses cloud sync:    $true"
         }
 
         # CBA status definitive if username was provided
@@ -435,7 +458,7 @@ function Invoke-ReconAsGuest
 
         # Get the list of tenants the user has access to
         $tenants = Get-AzureTenants -AccessToken $AccessToken
-        $tenantNames = $tenants | select -ExpandProperty Name
+        $tenantNames = $tenants | Select-Object -ExpandProperty Name
 
         # Prompt for tenant choice if more than one
         if($tenantNames.count -gt 1)
@@ -465,10 +488,10 @@ function Invoke-ReconAsGuest
 
         # Print out some relevant information
         Write-Host "Tenant brand:                $($tenantInformation.displayName)"
-        Write-Host "Tenant name:                 $($tenantInformation.domains | where isInitial -eq "True" | select -ExpandProperty id)"
+        Write-Host "Tenant name:                 $($tenantInformation.domains | Where-Object isInitial -eq "True" | Select-Object -ExpandProperty id)"
         Write-Host "Tenant id:                   $($tenantInformation.objectId)"
         Write-Host "Azure AD objects:            $($tenantInformation.directorySizeQuota.used)/$($tenantInformation.directorySizeQuota.total)"
-        Write-Host "Domains:                     $($tenantInformation.domains.Count) ($(($tenantInformation.domains | where isVerified -eq "True").Count) verified)"
+        Write-Host "Domains:                     $($tenantInformation.domains.Count) ($(($tenantInformation.domains | Where-Object isVerified -eq "True").Count) verified)"
         Write-Host "Non-admin users restricted?  $($tenantInformation.restrictNonAdminUsers)"
         Write-Host "Users can register apps?     $($tenantInformation.usersCanRegisterApps)"
         Write-Host "Directory access restricted? $($tenantInformation.restrictDirectoryAccess)"
@@ -540,7 +563,7 @@ function Invoke-UserEnumerationAsGuest
         # Get the list of tenants the user has access to
         Write-Verbose "Getting list of user's tenants.."
         $tenants = Get-AzureTenants -AccessToken $AccessToken
-        $tenantNames = $tenants | select -ExpandProperty Name
+        $tenantNames = $tenants | Select-Object -ExpandProperty Name
 
         # Prompt for tenant choice if more than one
         if($tenantNames.count -gt 1)
@@ -569,7 +592,7 @@ function Invoke-UserEnumerationAsGuest
 
         # Get the initial domain
         $domains = Get-MSGraphDomains -AccessToken $AccessToken
-        $tenantDomain = $domains | where isInitial -eq "True" | select -ExpandProperty id
+        $tenantDomain = $domains | Where-Object isInitial -eq "True" | Select-Object -ExpandProperty id
         if([string]::IsNullOrEmpty($tenantDomain))
         {
             Throw "No initial domain found for the tenant $tenant!"
@@ -861,7 +884,7 @@ function Invoke-ReconAsInsider
     MS Partner contracts:        0
     MS Partners:                 1
 
-    PS C:\>$results.roleInformation | Where Members -ne $null | select Name,Members
+    PS C:\>$results.roleInformation | Where-Object Members -ne $null | Select-Object Name,Members
 
     Name                               Members                                                                                       
     ----                               -------                                                                                       
@@ -901,7 +924,7 @@ function Invoke-ReconAsInsider
         Write-Verbose "Getting role information"
         $roles = Get-Roles -AccessToken $AAD_AccessToken
         $roleInformation=@()
-        $sortedRoles = $roles.Role | Sort -Property Name
+        $sortedRoles = $roles.Role | Sort-Object -Property Name
         foreach($role in $roles.Role)
         {
             Write-Verbose "Getting members of role ""$($role.Name)"""
@@ -910,7 +933,7 @@ function Invoke-ReconAsInsider
             $attributes["IsEnabled"] = $role.IsEnabled
             $attributes["IsSystem"] = $role.IsSystem
             $attributes["ObjectId"] = $role.ObjectId
-            $members = Get-RoleMembers -AccessToken $AAD_AccessToken -RoleObjectId $role.ObjectId | select @{N='DisplayName'; E={$_.DisplayName}},@{N='UserPrincipalName'; E={$_.EmailAddress}}
+            $members = Get-RoleMembers -AccessToken $AAD_AccessToken -RoleObjectId $role.ObjectId | Select-Object @{N='DisplayName'; E={$_.DisplayName}},@{N='UserPrincipalName'; E={$_.EmailAddress}}
 
             $attributes["Members"] = $members
 
@@ -1004,18 +1027,18 @@ function Invoke-ReconAsInsider
 
         # Print out some relevant information
         Write-Host "Tenant brand:                $($tenantInformation.displayName)"
-        Write-Host "Tenant name:                 $($tenantInformation.domains | where isInitial -eq "True" | select -ExpandProperty id)"
+        Write-Host "Tenant name:                 $($tenantInformation.domains | Where-Object isInitial -eq "True" | Select-Object -ExpandProperty id)"
         Write-Host "Tenant id:                   $tenantId"
         Write-Host "Tenant SKU:                  $($tenantSku -join ", ")"
         Write-Host "Azure AD objects:            $($tenantInformation.directorySizeQuota.used)/$($tenantInformation.directorySizeQuota.total)"
-        Write-Host "Domains:                     $($tenantInformation.domains.Count) ($(($tenantInformation.domains | where isVerified -eq "True").Count) verified)"
+        Write-Host "Domains:                     $($tenantInformation.domains.Count) ($(($tenantInformation.domains | Where-Object isVerified -eq "True").Count) verified)"
         Write-Host "Non-admin users restricted?  $($tenantInformation.restrictNonAdminUsers)"
         Write-Host "Users can register apps?     $($tenantInformation.usersCanRegisterApps)"
         Write-Host "Directory access restricted? $($tenantInformation.restrictDirectoryAccess)"
         Write-Host "Directory sync enabled?      $($tenantInformation.companyInformation.DirectorySynchronizationEnabled)"
         Write-Host "Global admins:               $(@($tenantInformation.roleInformation | Where-Object ObjectId -eq "62e90394-69f5-4237-9190-012177145e10" | Select-Object -ExpandProperty Members).Count)" 
         Write-Host "CA policies:                 $($tenantInformation.conditionalAccessPolicy.Count)" 
-        Write-Host "MS Partner IDs:              $(($tenantInformation.partnerOrganisations | where typeName -Like "Partner*" ).MPNID -join ",")"             
+        Write-Host "MS Partner IDs:              $(($tenantInformation.partnerOrganisations | Where-Object typeName -Like "Partner*" ).MPNID -join ",")"             
         Write-Host "MS Partner DAP enabled?      $($tenantInformation.partnerDAPEnabled)"
         Write-Host "MS Partner contracts:        $($tenantInformation.partnerContracts.Count)"             
         Write-Host "MS Partners:                 $($tenantInformation.partners.Count)"
@@ -1272,7 +1295,7 @@ function Invoke-Phishing
             if([string]::IsNullOrEmpty($Tenant))
             {
                 $tenants = Get-AzureTenants -AccessToken $AccessToken
-                $tenantNames = $tenants | select -ExpandProperty Name
+                $tenantNames = $tenants | Select-Object -ExpandProperty Name
 
                 # Prompt for tenant choice if more than one
                 if($tenantNames.count -gt 1)
