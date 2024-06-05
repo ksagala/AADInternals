@@ -42,6 +42,11 @@ $FOCIs = @{
     "ecd6b820-32c2-49b6-98a6-444530e5a77a" = "Microsoft Edge"
     "f05ff7c9-f75a-4acd-a3b5-f4b6a870245d" = "SharePoint Android"
     "f44b1140-bc5e-48c6-8dc0-5cf5a53c0e34" = "Microsoft Edge"
+    "be1918be-3fe3-4be9-b32b-b542fc27f02e" = "M365 Compliance Drive Client"
+    "cab96880-db5b-4e15-90a7-f3f1d62ffe39" = "Microsoft Defender Platform"
+    "d7b530a4-7680-4c23-a8bf-c52c121d2e87" = "Microsoft Edge Enterprise New Tab Page"
+    "dd47d17a-3194-4d86-bfd5-c6ae6f5651e3" = "Microsoft Defender for Mobile"
+    "e9b154d0-7658-433b-bb25-6b8e0a8a7c59" = "Outlook Lite"
 }
 
 # Stored tokens (access & refresh)
@@ -1579,13 +1584,23 @@ function Get-TenantDomains
     )
     Process
     {
+        # Get Tenant Region Scope/Subscope from Open ID configuration
+        Try {$openIdConfig = Invoke-RestMethod -UseBasicParsing "https://login.microsoftonline.com/$Domain/.well-known/openid-configuration"}
+        catch {$openIdConfig = $null}
+        if($openIdConfig.tenant_region_sub_scope -eq "DOD") 
+            {$uri = "https://autodiscover-s-dod.office365.us/autodiscover/autodiscover.svc"} #DoD
+        elseif($openIdConfig.tenant_region_sub_scope -eq "DODCON") 
+            {$uri = "https://autodiscover-s.office365.us/autodiscover/autodiscover.svc"} # GCC-High
+        else 
+            {$uri = "https://autodiscover-s.outlook.com/autodiscover/autodiscover.svc"} #Commercial/WW
+        
         # Create the body
         $body=@"
 <?xml version="1.0" encoding="utf-8"?>
 <soap:Envelope xmlns:exm="http://schemas.microsoft.com/exchange/services/2006/messages" xmlns:ext="http://schemas.microsoft.com/exchange/services/2006/types" xmlns:a="http://www.w3.org/2005/08/addressing" xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
 	<soap:Header>
 		<a:Action soap:mustUnderstand="1">http://schemas.microsoft.com/exchange/2010/Autodiscover/Autodiscover/GetFederationInformation</a:Action>
-		<a:To soap:mustUnderstand="1">https://autodiscover-s.outlook.com/autodiscover/autodiscover.svc</a:To>
+		<a:To soap:mustUnderstand="1">$uri</a:To>
 		<a:ReplyTo>
 			<a:Address>http://www.w3.org/2005/08/addressing/anonymous</a:Address>
 		</a:ReplyTo>
@@ -1606,7 +1621,7 @@ function Get-TenantDomains
             "User-Agent" =   "AutodiscoverClient"
         }
         # Invoke
-        $response = Invoke-RestMethod -UseBasicParsing -Method Post -uri "https://autodiscover-s.outlook.com/autodiscover/autodiscover.svc" -Body $body -Headers $headers
+        $response = Invoke-RestMethod -UseBasicParsing -Method Post -uri $uri -Body $body -Headers $headers
 
         # Return
 		$domains = $response.Envelope.body.GetFederationInformationResponseMessage.response.Domains.Domain
@@ -2801,17 +2816,25 @@ function Get-AuthorizationCode
                     if($config.pgid -eq "ConvergedProofUpRedirect")
                     {
                         Write-Verbose "ConvergedProofUpRedirect"
-                        Write-Warning "MFA must be set up in $($config.iRemainingDaysToSkipMfaRegistration) days"
-                        # Create the body
-                        $body = @{
-                            "LoginOptions" = 1
-                            "ctx"          = $config.sCtx
-                            "flowToken"    = $config.sFT
-                            "canary"       = $config.canary
-                        }
+                        $MFADays = $config.iRemainingDaysToSkipMfaRegistration
+                        if($MFADays)
+                        {
+                            Write-Warning "MFA must be set up in $($MFA) days"
+                            # Create the body
+                            $body = @{
+                                "LoginOptions" = 1
+                                "ctx"          = $config.sCtx
+                                "flowToken"    = $config.sFT
+                                "canary"       = $config.canary
+                            }
 
-                        $url = $config.urlSkipMfaRegistration
-                        $response = Invoke-WebRequest2 -Uri $url -WebSession $LoginSession -MaximumRedirection 0 -Headers $Headers -ErrorAction SilentlyContinue
+                            $url = $config.urlSkipMfaRegistration
+                            $response = Invoke-WebRequest2 -Uri $url -WebSession $LoginSession -MaximumRedirection 0 -Headers $Headers -ErrorAction SilentlyContinue
+                        }
+                        else
+                        {
+                            throw "MFA method must be registered."
+                        }
                     }
                     # Keep me signed in prompt
                     elseif($config.pgid -eq "KmsiInterrupt")
